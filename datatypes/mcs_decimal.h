@@ -24,6 +24,8 @@
 #include "calpontsystemcatalog.h"
 
 using int128_t = __int128;
+using ColTypeAlias = execplan::CalpontSystemCatalog::ColType;
+using ColDataTypeAlias = execplan::CalpontSystemCatalog::ColDataType;
 
 namespace execplan
 {
@@ -37,6 +39,8 @@ constexpr uint32_t MAXDECIMALWIDTH = 16U;
 constexpr uint8_t INT64MAXPRECISION = 18U;
 constexpr uint8_t INT128MAXPRECISION = 38U;
 constexpr uint8_t MAXLEGACYWIDTH = 8U;
+constexpr uint8_t MAXSCALEINC4AVG = 4U;
+constexpr int8_t IGNOREPRECISION = -1;
 
 const uint64_t mcs_pow_10[20] =
 {
@@ -159,12 +163,13 @@ class Decimal
             @brief Convenience method to put decimal into a std::string.
         */
         static std::string toString(execplan::IDB_Decimal& value);
+        static std::string toString(const execplan::IDB_Decimal& value);
 
         /**
             @brief The method detects whether decimal type is wide
-            using csc data type.
+            using csc colType.
         */
-        static constexpr inline bool isWideDecimalType(const execplan::CalpontSystemCatalog::ColType& ct)
+        static constexpr inline bool isWideDecimalType(const ColTypeAlias& ct)
         {
             return ((ct.colDataType == execplan::CalpontSystemCatalog::DECIMAL ||
                 ct.colDataType == execplan::CalpontSystemCatalog::UDECIMAL) &&
@@ -182,10 +187,22 @@ class Decimal
         }
 
         /**
+            @brief The method detects whether decimal type is wide
+            using datatype and width.
+        */
+        static constexpr inline bool isWideDecimalType(const ColDataTypeAlias dt,
+            const int32_t width)
+        {
+            return (width == MAXDECIMALWIDTH &&
+                (dt == execplan::CalpontSystemCatalog::DECIMAL ||
+                 dt == execplan::CalpontSystemCatalog::UDECIMAL));
+        }
+
+        /**
             @brief The method sets the legacy scale and precision of a wide decimal
             column which is the result of an arithmetic operation.
         */
-        static inline void setDecimalScalePrecisionLegacy(execplan::CalpontSystemCatalog::ColType& ct,
+        static inline void setDecimalScalePrecisionLegacy(ColTypeAlias& ct,
             unsigned int precision, unsigned int scale)
         {
             ct.scale = scale;
@@ -200,7 +217,7 @@ class Decimal
             @brief The method sets the scale and precision of a wide decimal
             column which is the result of an arithmetic operation.
         */
-        static inline void setDecimalScalePrecision(execplan::CalpontSystemCatalog::ColType& ct,
+        static inline void setDecimalScalePrecision(ColTypeAlias& ct,
             unsigned int precision, unsigned int scale)
         {
             ct.colWidth = (precision > INT64MAXPRECISION)
@@ -216,7 +233,7 @@ class Decimal
             @brief The method sets the scale and precision of a wide decimal
             column which is the result of an arithmetic operation, based on a heuristic.
         */
-        static inline void setDecimalScalePrecisionHeuristic(execplan::CalpontSystemCatalog::ColType& ct,
+        static inline void setDecimalScalePrecisionHeuristic(ColTypeAlias& ct,
             unsigned int precision, unsigned int scale)
         {
             unsigned int diff = 0;
@@ -336,6 +353,19 @@ class Decimal
                 return INT64_MIN;
 
             return static_cast<int64_t>(value);
+        }
+
+        /**
+            @brief MDB increases scale by up to 4 digits calculating avg()
+        */
+        static inline void setScalePrecision4Avg(
+            unsigned int& precision,
+            unsigned int& scale)
+        {
+            uint32_t scaleAvailable = INT128MAXPRECISION - scale;
+            uint32_t precisionAvailable = INT128MAXPRECISION - precision;
+            scale += (scaleAvailable >= MAXSCALEINC4AVG) ? MAXSCALEINC4AVG : scaleAvailable;
+            precision += (precisionAvailable >= MAXSCALEINC4AVG) ? MAXSCALEINC4AVG : precisionAvailable;
         }
 };
 

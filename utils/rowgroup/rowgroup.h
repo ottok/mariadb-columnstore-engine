@@ -387,6 +387,8 @@ public:
     template<typename T>
     inline void setBinaryField(T* strdata, uint32_t width, uint32_t colIndex);
     template<typename T>
+    inline void setBinaryField(T* strdata, uint32_t colIndex);
+    template<typename T>
     inline void setBinaryField_offset(T* strdata, uint32_t width, uint32_t colIndex);
     // support VARBINARY
     // Add 2-byte length at the beginning of the field.  NULL and zero length field are
@@ -433,7 +435,7 @@ public:
     // that's not string-table safe, this one is
     inline void copyField(Row& dest, uint32_t destIndex, uint32_t srcIndex) const;
 
-    // WIP MCOL-641
+    template<typename T>
     inline void copyBinaryField(Row& dest, uint32_t destIndex, uint32_t srcIndex) const;
 
     std::string toString() const;
@@ -769,25 +771,22 @@ inline uint32_t Row::getStringLength(uint32_t colIndex) const
     return strnlen((char*) &data[offsets[colIndex]], getColumnWidth(colIndex));
 }
 
-// WIP Remove this
-// Check whether memcpy affects perf here
-/*inline void Row::setBinaryField(const uint8_t* strdata, uint32_t length, uint32_t offset)
-{
-    memcpy(&data[offset], strdata, length);
-}*/
-
-// MCOL-641. This method can be applied to uint8_t* buffers.
 template<typename T>
 inline void Row::setBinaryField(T* value, uint32_t width, uint32_t colIndex)
 {
     memcpy(&data[offsets[colIndex]], value, width);
 }
 
-// MCOL-641. This method !cannot! be applied to uint8_t* buffers.
+template<typename T>
+inline void Row::setBinaryField(T* value, uint32_t colIndex)
+{
+    *reinterpret_cast<T*>(&data[offsets[colIndex]]) = *value;
+}
+
+// This method !cannot! be applied to uint8_t* buffers.
 template<typename T>
 inline void Row::setBinaryField_offset(T* value, uint32_t width, uint32_t offset)
 {
-    // WIP Compare performance.
     *reinterpret_cast<T*>(&data[offset]) = *value;
 }
 
@@ -830,23 +829,15 @@ inline std::string Row::getStringField(uint32_t colIndex) const
                        strnlen((char*) &data[offsets[colIndex]], getColumnWidth(colIndex)));
 }
 
-/*inline std::string Row::getBinaryField(uint32_t colIndex) const
-{
-    return std::string((char*) &data[offsets[colIndex]], getColumnWidth(colIndex));
-}*/
-
-// WIP MCOL-641
 template <typename T>
 inline T* Row::getBinaryField(uint32_t colIndex) const
 {
-    //return reinterpret_cast<T*>(&data[offsets[colIndex]]);
     return getBinaryField_offset<T>(offsets[colIndex]);
 }
 
 template <typename T>
 inline T* Row::getBinaryField(T* argtype, uint32_t colIndex) const
 {
-    //return reinterpret_cast<T*>(&data[offsets[colIndex]]);
     return getBinaryField_offset<T>(offsets[colIndex]);
 }
 
@@ -1179,22 +1170,36 @@ inline void Row::copyField(Row& out, uint32_t destIndex, uint32_t srcIndex) cons
     if (UNLIKELY(types[srcIndex] == execplan::CalpontSystemCatalog::VARBINARY ||
                  types[srcIndex] == execplan::CalpontSystemCatalog::BLOB ||
                  types[srcIndex] == execplan::CalpontSystemCatalog::TEXT))
+    {
         out.setVarBinaryField(getVarBinaryStringField(srcIndex), destIndex);
+    }
     else if (UNLIKELY(isLongString(srcIndex)))
+    {
         out.setStringField(getStringPointer(srcIndex), getStringLength(srcIndex), destIndex);
-    //out.setStringField(getStringField(srcIndex), destIndex);
+    }
     else if (UNLIKELY(isShortString(srcIndex)))
+    {
         out.setUintField(getUintField(srcIndex), destIndex);
+    }
     else if (UNLIKELY(types[srcIndex] == execplan::CalpontSystemCatalog::LONGDOUBLE))
+    {
         out.setLongDoubleField(getLongDoubleField(srcIndex), destIndex);
+    }
+    else if (UNLIKELY(datatypes::Decimal::isWideDecimalType(
+        types[srcIndex], colWidths[srcIndex])))
+    {
+        copyBinaryField<int128_t>(out, destIndex, srcIndex);
+    }
     else
+    {
         out.setIntField(getIntField(srcIndex), destIndex);
+    }
 }
 
-// WIP MCOL-641
+template<typename T>
 inline void Row::copyBinaryField(Row& out, uint32_t destIndex, uint32_t srcIndex) const
 {
-    out.setBinaryField(getBinaryField<int128_t>(srcIndex), 16, destIndex);
+    out.setBinaryField(getBinaryField<T>(srcIndex), destIndex);
 }
 
 inline void Row::setRid(uint64_t rid)
@@ -1313,7 +1318,7 @@ inline bool Row::equals(const Row& r2, uint32_t lastCol) const
             }
             else if (UNLIKELY(execplan::isDecimal(columnType)))
             {
-                if (getBinaryField<int128_t>(i) != r2.getBinaryField<int128_t>(i))
+                if (*getBinaryField<int128_t>(i) != *r2.getBinaryField<int128_t>(i))
                     return false;
             }
 
@@ -1878,20 +1883,30 @@ inline void copyRow(const Row& in, Row* out, uint32_t colCount)
                      in.getColTypes()[i] == execplan::CalpontSystemCatalog::BLOB ||
                      in.getColTypes()[i] == execplan::CalpontSystemCatalog::TEXT ||
                      in.getColTypes()[i] == execplan::CalpontSystemCatalog::CLOB))
+        {
             out->setVarBinaryField(in.getVarBinaryStringField(i), i);
+        }
         else if (UNLIKELY(in.isLongString(i)))
-            //out->setStringField(in.getStringField(i), i);
+        {
             out->setStringField(in.getStringPointer(i), in.getStringLength(i), i);
+        }
         else if (UNLIKELY(in.isShortString(i)))
+        {
             out->setUintField(in.getUintField(i), i);
+        }
         else if (UNLIKELY(in.getColTypes()[i] == execplan::CalpontSystemCatalog::LONGDOUBLE))
+        {
             out->setLongDoubleField(in.getLongDoubleField(i), i);
-        else if (UNLIKELY((in.getColType(i) == execplan::CalpontSystemCatalog::DECIMAL ||
-                           in.getColType(i) == execplan::CalpontSystemCatalog::UDECIMAL) &&
-                           in.getColumnWidth(i) == datatypes::MAXDECIMALWIDTH))
-            in.copyBinaryField(*out, i, i);
+        }
+        else if (UNLIKELY(datatypes::Decimal::isWideDecimalType(
+            in.getColType(i), in.getColumnWidth(i))))
+        {
+            in.copyBinaryField<int128_t>(*out, i, i);
+        }
         else
+        {
             out->setIntField(in.getIntField(i), i);
+        }
     }
 }
 
