@@ -25,16 +25,19 @@ local rpm_build_deps = 'install -y systemd-devel git make gcc gcc-c++ libaio-dev
 local deb_build_deps = 'apt update && apt install --yes --no-install-recommends build-essential devscripts ccache equivs && ' +
                        'mk-build-deps debian/control -t "apt-get -y -o Debug::pkgProblemResolver=yes --no-install-recommends" -r -i';
 
+// Use ColumnStore/debian to only build it and not the whole server
+local deb_use_columnstore_packaging = 'rm -rf debian; cp -ra storage/columnstore/columnstore/debian . && '
+
 local platformMap(branch, platform) =
   local platform_map = {
     'opensuse/leap:15': 'zypper ' + rpm_build_deps + ' cmake libboost_system-devel libboost_filesystem-devel libboost_thread-devel libboost_regex-devel libboost_date_time-devel libboost_chrono-devel libboost_atomic-devel gcc-fortran && cmake ' + cmakeflags + ' -DRPM=sles15 && make -j$(nproc) package',
     'centos:7': 'yum install -y epel-release && yum install -y cmake3 && ln -s /usr/bin/cmake3 /usr/bin/cmake && yum ' + rpm_build_deps + ' libquadmath libquadmath-devel && cmake ' + cmakeflags + ' -DRPM=centos7 && make -j$(nproc) package',
     'centos:8': "yum install -y libgcc && sed -i 's/enabled=0/enabled=1/' /etc/yum.repos.d/*PowerTools.repo && yum " + rpm_build_deps + ' cmake libquadmath libquadmath-devel && cmake ' + cmakeflags + ' -DRPM=centos8 && make -j$(nproc) package',
-    'debian:9': deb_build_deps + " && CMAKEFLAGS='" + cmakeflags + " -DDEB=stretch' debian/autobake-deb.sh",
-    'debian:10': deb_build_deps + " && CMAKEFLAGS='" + cmakeflags + " -DDEB=buster' debian/autobake-deb.sh",
-    'ubuntu:16.04': deb_build_deps + " && CMAKEFLAGS='" + cmakeflags + " -DDEB=xenial' debian/autobake-deb.sh",
-    'ubuntu:18.04': deb_build_deps + " && CMAKEFLAGS='" + cmakeflags + " -DDEB=bionic' debian/autobake-deb.sh",
-    'ubuntu:20.04': deb_build_deps + " && CMAKEFLAGS='" + cmakeflags + " -DDEB=focal' debian/autobake-deb.sh",
+    'debian:9': deb_use_columnstore_packaging + deb_build_deps + " && CMAKEFLAGS='" + cmakeflags + branch_cmakeflags_map[branch] + "' debian/autobake-deb.sh",
+    'debian:10': deb_use_columnstore_packaging + deb_build_deps + " && CMAKEFLAGS='" + cmakeflags + branch_cmakeflags_map[branch] + "' debian/autobake-deb.sh",
+    'ubuntu:16.04': deb_use_columnstore_packaging + deb_build_deps + " && CMAKEFLAGS='" + cmakeflags + branch_cmakeflags_map[branch] + "' debian/autobake-deb.sh",
+    'ubuntu:18.04': deb_use_columnstore_packaging + deb_build_deps + " && CMAKEFLAGS='" + cmakeflags + branch_cmakeflags_map[branch] + "' debian/autobake-deb.sh",
+    'ubuntu:20.04': deb_use_columnstore_packaging + deb_build_deps + " && CMAKEFLAGS='" + cmakeflags + branch_cmakeflags_map[branch] + "' debian/autobake-deb.sh",
   };
 
   platform_map[platform];
@@ -306,27 +309,11 @@ local Pipeline(branch, platform, event) = {
                'cd /mdb/' + builddir,
                // Remove Debian build flags that could prevent ColumnStore from building
                "sed '/-DPLUGIN_COLUMNSTORE=NO/d' -i debian/rules",
-               // Tweak debian packaging stuff
-               "sed -i -e '/Package: mariadb-backup/,/^$/d' debian/control",
-               "sed -i -e '/Package: mariadb-plugin-connect/,/^$/d' debian/control",
-               "sed -i -e '/Package: mariadb-plugin-gssapi*/,/^$/d' debian/control",
-               "sed -i -e '/Package: mariadb-plugin-xpand*/,/^$/d' debian/control",
-               'sed "/Package: mariadb-plugin-mroonga/,/^$/d" -i debian/control',
-               'sed "/Package: mariadb-plugin-rocksdb/,/^$/d" -i debian/control',
-               'sed "/Package: mariadb-plugin-spider/,/^$/d" -i debian/control',
-               'sed "/Package: mariadb-plugin-oqgraph/,/^$/d" -i debian/control',
-               'sed "/ha_sphinx.so/d" -i debian/mariadb-server-*.install',
-               'sed "/Package: libmariadbd19/,/^$/d" -i debian/control',
-               'sed "/Package: libmariadbd-dev/,/^$/d" -i debian/control',
-               // Disable Galera
-               "sed -i -e 's/Depends: galera.*/Depends:/' debian/control",
-               "sed -i -e 's/\"galera-enterprise-4\"//' cmake/cpack_rpm.cmake",
-               "sed -i -e '/wsrep/d' debian/mariadb-server-*.install",
-               // Leave test package for mtr
-               "sed -i '/(mariadb|mysql)-test/d;/-test/d' debian/autobake-deb.sh",
-               "sed -i '/test-embedded/d' debian/mariadb-test.install",
-               // Change plugin_maturity level
-               // "sed -i 's/BETA/GAMMA/' storage/columnstore/CMakeLists.txt",
+               // Clean away Debian build flag this Drone CI config wants to inject by itself
+               "sed '/-DCMAKE_BUILD_TYPE=/d' -i debian/rules",
+               "sed '/-DBUILD_CONFIG=/d' -i debian/rules",
+               // Remove all packages from debian/control so mariadb-plugin-columnstore can be cleanly added
+               "sed '/Package: libmariadb-dev$/Q' -i debian/control",
                platformMap(branch, platform),
                if (pkg_format == 'rpm') then 'createrepo .' else 'dpkg-scanpackages ../ | gzip > ../Packages.gz',
              ],

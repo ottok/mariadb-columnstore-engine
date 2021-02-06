@@ -1,0 +1,110 @@
+#!/usr/bin/make -f
+
+# Enable Debian Hardening
+# https://wiki.debian.org/Hardening
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+DPKG_EXPORT_BUILDFLAGS = 1
+# Include all defaults, including buildflags.mk
+include /usr/share/dpkg/default.mk
+# CPPFLAGS are nor read by CMake, so copy them to CXXFLAGS
+# See why at https://cmake.org/Bug/view.php?id=12928
+# This is needed for e.g. all automatic Debian hardening flags to apply on all cmake builds.
+CFLAGS+=$(CPPFLAGS)
+CXXFLAGS+=$(CPPFLAGS)
+
+BUILDDIR := builddir
+DEB_VERSION_REVISION := $(shell echo $(DEB_VERSION) | sed -e 's/^.*-//')
+RELEASE := $(shell lsb_release -r -s) # Use changelog based DEB_DISTRIBUTION instead?
+TMP:=$(CURDIR)/debian/tmp
+
+CC := $(DEB_HOST_GNU_TYPE)-gcc
+CXX := $(DEB_HOST_GNU_TYPE)-g++
+
+# According to Debian Policy version 4.2.0 builds should be as verbose as
+# possible unless 'terse' is specifically passed.
+ifeq (,$(filter terse,$(DEB_BUILD_OPTIONS)))
+    export DH_VERBOSE=1
+endif
+
+# Parallel build support as advised
+# at https://www.debian.org/doc/debian-policy/ch-source.html#s-debianrules-options
+ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+    NUMJOBS = $(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+    MAKEFLAGS += -j$(NUMJOBS)
+else
+    # NUMJOBS cannot be empty as it is used as a parameter to mtr, default to 1.
+    NUMJOBS = 1
+endif
+
+# Add support for verbose builds
+MAKEFLAGS += VERBOSE=1
+
+override_dh_auto_clean:
+	@echo "RULES.$@"
+	dh_testdir
+	dh_testroot
+	rm -rf $(BUILDDIR) builddir-native
+
+override_dh_auto_configure:
+	@echo "RULES.$@"
+	dh_testdir
+
+ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
+	dpkg-architecture -a$(DEB_BUILD_ARCH) -f -c dh_auto_configure --builddirectory=builddir-native
+	dh_auto_build --builddirectory=builddir-native -- import_executables
+endif
+
+	mkdir -p $(BUILDDIR) && cd $(BUILDDIR) && \
+	sh -c  'PATH=$${MYSQL_BUILD_PATH:-"/usr/lib/ccache:/usr/local/bin:/usr/bin:/bin"} \
+	    	CC=${CC} \
+	    	CXX=${CXX} \
+	    cmake -DCMAKE_INSTALL_PREFIX=/usr \
+	    $(CMAKEFLAGS) \
+	    -DCOMPILATION_COMMENT="mariadb.org binary distribution" \
+	    -DMYSQL_SERVER_SUFFIX="-$(DEB_VERSION_REVISION)" \
+	    -DSYSTEM_TYPE="debian-$(DEB_HOST_GNU_SYSTEM)" \
+	    -DCMAKE_SYSTEM_PROCESSOR=$(DEB_HOST_ARCH) \
+	    -DBUILD_CONFIG=mysql_release \
+	    -DPLUGIN_AWS_KEY_MANAGEMENT=NO \
+			-DPLUGIN_CONNECT=NO \
+			-DPLUGIN_MROONGA=NO \
+			-DPLUGIN_OQGRAPH=NO \
+			-DPLUGIN_PERFSCHEMA=NO \
+			-DPLUGIN_ROCKSDB=NO \
+			-DPLUGIN_SPHINX=NO \
+			-DPLUGIN_SPIDER=NO \
+			-DPLUGIN_TOKUDB=NO \
+			-DPLUGIN_XPAND=NO \
+			-DWITH_EMBEDDED_SERVER=OFF \
+			-DWITH_WSREP=OFF \
+	    -DDEB=$(DEB_VENDOR) ..'
+
+# This is needed, otherwise 'make test' will run before binaries have been built
+override_dh_auto_build:
+	@echo "RULES.$@"
+	# Print build env info to help debug builds on different platforms
+	dpkg-architecture
+	cd $(BUILDDIR) && $(MAKE)
+
+override_dh_auto_test:
+	@echo "RULES.$@"
+	dh_testdir
+	# Run testsuite
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	cd $(BUILDDIR)/mysql-test && ./mtr --force --mem --parallel=$(NUMJOBS) --skip-rpl --suite=main --skip-test-list=unstable-tests  || $(TESTSUITE_FAIL_CMD) ;
+endif
+
+override_dh_auto_install:
+	@echo "RULES.$@"
+	dh_testdir
+	dh_testroot
+
+	# Run 'make install' without output since it is uninteresting and
+	# silencing it helps to make overall build log shorter and more readable
+	@echo "Running $(MAKE) install DESTDIR=$(TMP) ..."
+	cd $(BUILDDIR) && $(MAKE) install DESTDIR=$(TMP) > /dev/null
+
+%:
+	dh $@ --parallel --list-missing
+
+# vim: ts=8
